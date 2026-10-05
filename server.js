@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
-const { syncProducts, isShopifyConfigured } = require("./productSync");
+const { syncProducts, isShopifyConfigured, toBaakmanCode } = require("./productSync");
 
 // ===============================
 // ✅ ENV VALIDATION
@@ -403,7 +403,7 @@ function mapShopifyToBaakman(order) {
     comment,
 
     orderLines: order.line_items.map(item => ({
-      productCode: clip(item.sku || item.product_id, 30),
+      productCode: clip(toBaakmanCode(item.sku) || item.product_id, 30),
       productDescription: [item.title, item.variant_title].filter(Boolean).join(" - "),
       comment: "",
       grossPrice: parseFloat(item.price) || 0,

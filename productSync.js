@@ -136,7 +136,11 @@ async function setProductStatus(product, status) {
 }
 
 // ---------- sync ----------
-const normalizeCode = code => String(code || "").trim().toUpperCase();
+// Shopify SKUs sometimes carry a "DS" prefix that Baakman codes don't have
+// (Shopify "DSXT-126" = Baakman "XT-126"). Baakman has no codes starting with DS.
+function toBaakmanCode(sku) {
+  return String(sku || "").trim().toUpperCase().replace(/^DS(?=[A-Z]+-)/, "");
+}
 
 /**
  * @param {() => Promise<Array>} fetchBaakmanCatalogue - must throw on failure
@@ -150,17 +154,17 @@ async function syncProducts(fetchBaakmanCatalogue, { dryRun }) {
     throw new Error("Baakman catalogue is empty — sync aborted, nothing changed");
   }
 
-  const baakmanCodes = new Set(catalogue.map(p => normalizeCode(p.code)));
+  const baakmanCodes = new Set(catalogue.map(p => String(p.code || "").trim().toUpperCase()));
   const shopifyProducts = await getAllShopifyProducts();
 
   const toDisable = [];
   const toEnable = [];
 
   for (const product of shopifyProducts) {
-    const skus = product.variants.nodes.map(v => normalizeCode(v.sku)).filter(Boolean);
+    const skus = product.variants.nodes.map(v => String(v.sku || "").trim()).filter(Boolean);
     if (skus.length === 0) continue; // no SKU → not a Baakman product, leave it alone
 
-    const available = skus.some(sku => baakmanCodes.has(sku));
+    const available = skus.some(sku => baakmanCodes.has(toBaakmanCode(sku)));
     const disabledBySync = product.tags.includes(SYNC_TAG);
 
     if (!available && product.status === "ACTIVE") {
@@ -213,4 +217,4 @@ async function syncProducts(fetchBaakmanCatalogue, { dryRun }) {
   return summary;
 }
 
-module.exports = { syncProducts, isShopifyConfigured };
+module.exports = { syncProducts, isShopifyConfigured, toBaakmanCode };
