@@ -166,8 +166,8 @@ async function scheduledProductSync() {
 
     if (!summary.dryRun && (summary.disabled.length || summary.failures.length)) {
       await sendSlackAlert(
-        `🔄 Product sync: hid ${summary.disabled.length} product(s) not in Baakman catalogue` +
-        (summary.disabled.length ? `\n• ${summary.disabled.map(p => p.title).join("\n• ")}` : "") +
+        `🔄 Product sync: hid ${summary.disabled.length} product(s) unavailable at Baakman` +
+        (summary.disabled.length ? `\n• ${summary.disabled.map(p => `${p.title} (${p.reason})`).join("\n• ")}` : "") +
         (summary.failures.length ? `\n⚠️ Failures:\n${summary.failures.join("\n")}` : "")
       );
     }

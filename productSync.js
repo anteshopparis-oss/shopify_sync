@@ -3,9 +3,10 @@ const axios = require("axios");
 // ===============================
 // 🔄 PRODUCT SYNC (Baakman catalogue → Shopify product status)
 // ===============================
-// Any Shopify product whose SKUs are all missing from the Baakman catalogue
-// is set to DRAFT (hidden from the store) and tagged. When the SKU comes back
-// in the catalogue, products carrying that tag are set to ACTIVE again.
+// Any Shopify product whose SKUs are all missing from the Baakman catalogue,
+// or out of stock there, is set to DRAFT (hidden from the store) and tagged.
+// When the SKU is available again, products carrying that tag are set to
+// ACTIVE again.
 // Products drafted by hand (no tag) are never reactivated.
 
 const SYNC_TAG = "baakman-unavailable";
@@ -142,6 +143,22 @@ function toBaakmanCode(sku) {
   return String(sku || "").trim().toUpperCase().replace(/^DS(?=[A-Z]+-)/, "");
 }
 
+// Baakman stock indicators (API in Dutch, CSV export in English):
+//   Ruime voorraad / Large stock, Beperkte voorraad / Limited stock,
+//   Wordt verwacht / To be expected, OUT OF STOCK / NO STOCK
+const OUT_OF_STOCK = ["OUT OF STOCK", "NO STOCK"];
+const EXPECTED = ["WORDT VERWACHT", "TO BE EXPECTED"];
+
+// PRODUCT_SYNC_HIDE_EXPECTED=on also hides "expected" (not in stock yet) products
+function unavailableReason(stockIndicator) {
+  const stock = String(stockIndicator || "").trim().toUpperCase();
+  if (OUT_OF_STOCK.includes(stock)) return "out of stock at Baakman";
+  if (EXPECTED.includes(stock) && process.env.PRODUCT_SYNC_HIDE_EXPECTED === "on") {
+    return "not in stock yet at Baakman (expected)";
+  }
+  return null;
+}
+
 /**
  * @param {() => Promise<Array>} fetchBaakmanCatalogue - must throw on failure
  * @param {{ dryRun: boolean }} options
@@ -154,7 +171,9 @@ async function syncProducts(fetchBaakmanCatalogue, { dryRun }) {
     throw new Error("Baakman catalogue is empty — sync aborted, nothing changed");
   }
 
-  const baakmanCodes = new Set(catalogue.map(p => String(p.code || "").trim().toUpperCase()));
+  const stockByCode = new Map(
+    catalogue.map(p => [String(p.code || "").trim().toUpperCase(), p.stockIndicator])
+  );
   const shopifyProducts = await getAllShopifyProducts();
 
   const toDisable = [];
@@ -164,11 +183,17 @@ async function syncProducts(fetchBaakmanCatalogue, { dryRun }) {
     const skus = product.variants.nodes.map(v => String(v.sku || "").trim()).filter(Boolean);
     if (skus.length === 0) continue; // no SKU → not a Baakman product, leave it alone
 
-    const available = skus.some(sku => baakmanCodes.has(toBaakmanCode(sku)));
+    // available if at least one variant is in the catalogue and in stock
+    const reasons = skus.map(sku => {
+      const code = toBaakmanCode(sku);
+      if (!stockByCode.has(code)) return "not in Baakman catalogue";
+      return unavailableReason(stockByCode.get(code));
+    });
+    const available = reasons.some(reason => reason === null);
     const disabledBySync = product.tags.includes(SYNC_TAG);
 
     if (!available && product.status === "ACTIVE") {
-      toDisable.push({ product, skus });
+      toDisable.push({ product, skus, reason: [...new Set(reasons)].join(", ") });
     } else if (available && disabledBySync && product.status === "DRAFT") {
       toEnable.push({ product, skus });
     }
@@ -177,8 +202,8 @@ async function syncProducts(fetchBaakmanCatalogue, { dryRun }) {
   const label = dryRun ? "[PREVIEW] would " : "";
   const failures = [];
 
-  for (const { product, skus } of toDisable) {
-    console.log(`🚫 ${label}disable "${product.title}" (${skus.join(", ")}) — not in Baakman catalogue`);
+  for (const { product, skus, reason } of toDisable) {
+    console.log(`🚫 ${label}disable "${product.title}" (${skus.join(", ")}) — ${reason}`);
     if (!dryRun) {
       try {
         await setProductStatus(product, "DRAFT");
@@ -189,7 +214,7 @@ async function syncProducts(fetchBaakmanCatalogue, { dryRun }) {
   }
 
   for (const { product, skus } of toEnable) {
-    console.log(`✅ ${label}re-enable "${product.title}" (${skus.join(", ")}) — back in Baakman catalogue`);
+    console.log(`✅ ${label}re-enable "${product.title}" (${skus.join(", ")}) — available again at Baakman`);
     if (!dryRun) {
       try {
         await setProductStatus(product, "ACTIVE");
@@ -203,7 +228,7 @@ async function syncProducts(fetchBaakmanCatalogue, { dryRun }) {
     dryRun,
     shopifyProducts: shopifyProducts.length,
     baakmanProducts: catalogue.length,
-    disabled: toDisable.map(({ product, skus }) => ({ title: product.title, skus })),
+    disabled: toDisable.map(({ product, skus, reason }) => ({ title: product.title, skus, reason })),
     reEnabled: toEnable.map(({ product, skus }) => ({ title: product.title, skus })),
     failures
   };
