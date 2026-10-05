@@ -4,6 +4,7 @@ const crypto = require("crypto");
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
+const { syncProducts, isShopifyConfigured } = require("./productSync");
 
 // ===============================
 // ✅ ENV VALIDATION
@@ -125,6 +126,72 @@ async function getBaakmanProducts() {
 app.get("/products", async (req, res) => {
   const products = await getBaakmanProducts();
   res.json(products);
+});
+
+// ===============================
+// 🔄 1b. PRODUCT SYNC (hide Shopify products Baakman doesn't have)
+// ===============================
+// PRODUCT_SYNC=on      → really set missing products to Draft
+// anything else        → preview only: logs what it would change
+const PRODUCT_SYNC_LIVE = process.env.PRODUCT_SYNC === "on";
+const PRODUCT_SYNC_INTERVAL_MINUTES = Number(process.env.PRODUCT_SYNC_INTERVAL_MINUTES) || 60;
+
+// unlike getBaakmanProducts, this throws on failure so the sync can abort safely
+async function fetchBaakmanCatalogue() {
+  const response = await axios.get(`${BAAKMAN_API}/Product`, {
+    headers: BAAKMAN_HEADERS,
+    timeout: 60000
+  });
+  return response.data;
+}
+
+let productSyncRunning = false;
+
+async function runProductSync(dryRun) {
+  if (productSyncRunning) {
+    throw new Error("Product sync already running");
+  }
+
+  productSyncRunning = true;
+  try {
+    return await syncProducts(fetchBaakmanCatalogue, { dryRun });
+  } finally {
+    productSyncRunning = false;
+  }
+}
+
+async function scheduledProductSync() {
+  try {
+    const summary = await runProductSync(!PRODUCT_SYNC_LIVE);
+
+    if (!summary.dryRun && (summary.disabled.length || summary.failures.length)) {
+      await sendSlackAlert(
+        `🔄 Product sync: hid ${summary.disabled.length} product(s) not in Baakman catalogue` +
+        (summary.disabled.length ? `\n• ${summary.disabled.map(p => p.title).join("\n• ")}` : "") +
+        (summary.failures.length ? `\n⚠️ Failures:\n${summary.failures.join("\n")}` : "")
+      );
+    }
+  } catch (err) {
+    console.error("❌ Product sync failed:", describeError(err));
+  }
+}
+
+// manual run: POST /sync/products (x-admin-token), add ?preview=1 to only preview
+app.post("/sync/products", async (req, res) => {
+  if (!ADMIN_TOKEN || req.get("x-admin-token") !== ADMIN_TOKEN) {
+    return res.sendStatus(401);
+  }
+
+  if (!isShopifyConfigured()) {
+    return res.status(400).json({ error: "Shopify API not configured (SHOPIFY_STORE + token)" });
+  }
+
+  try {
+    const dryRun = req.query.preview === "1" || !PRODUCT_SYNC_LIVE;
+    res.json(await runProductSync(dryRun));
+  } catch (err) {
+    res.status(500).json({ error: describeError(err) });
+  }
 });
 
 // ===============================
@@ -352,4 +419,17 @@ const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
+
+  if (!isShopifyConfigured()) {
+    console.warn("⚠️ Shopify API not configured (SHOPIFY_STORE + token) — product sync disabled");
+    return;
+  }
+
+  console.log(
+    `🔄 Product sync every ${PRODUCT_SYNC_INTERVAL_MINUTES} min — ` +
+    (PRODUCT_SYNC_LIVE ? "LIVE (products will be set to Draft)" : "PREVIEW only (set PRODUCT_SYNC=on to apply)")
+  );
+
+  scheduledProductSync();
+  setInterval(scheduledProductSync, PRODUCT_SYNC_INTERVAL_MINUTES * 60 * 1000);
 });
